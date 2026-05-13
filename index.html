@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>포도</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #fafafa;
+      overflow: hidden;
+    }
+
+    #score {
+      position: fixed;
+      top: 24px; left: 28px;
+      font-family: system-ui, sans-serif;
+      font-size: 56px;
+      font-weight: 400;
+      color: #000;
+      line-height: 1;
+      pointer-events: none;
+    }
+
+    #stage {
+      width: 100%; height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #podo {
+      height: 65vh;
+      width: auto;
+      display: block;
+      -webkit-user-drag: none;
+      user-select: none;
+    }
+
+    /* warn: rises just before standing */
+    #podo.warn {
+      animation: warn var(--warn-dur, 0.4s) ease forwards;
+    }
+
+    @keyframes warn {
+      0%   { transform: translateY(0px)  rotate(0deg); }
+      40%  { transform: translateY(-6px) rotate(1.5deg); }
+      70%  { transform: translateY(-4px) rotate(-0.5deg); }
+      100% { transform: translateY(-5px) rotate(1deg); }
+    }
+
+    /* pet: micro-wiggle while stroking */
+    #podo.petting {
+      animation: pet 0.12s ease-in-out infinite alternate;
+    }
+
+    @keyframes pet {
+      from { transform: translateX(-1.5px); }
+      to   { transform: translateX(1.5px); }
+    }
+
+    /* screen-shake on game over */
+    body.shake {
+      animation: shake 0.22s ease;
+    }
+
+    @keyframes shake {
+      0%   { transform: translate(0,0); }
+      18%  { transform: translate(-6px, 2px); }
+      36%  { transform: translate(5px, -3px); }
+      54%  { transform: translate(-4px, 3px); }
+      72%  { transform: translate(4px, -1px); }
+      100% { transform: translate(0,0); }
+    }
+
+    #overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.72);
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #overlay.show { display: flex; }
+
+    #overlay .title {
+      font-family: system-ui, sans-serif;
+      font-size: 52px;
+      font-weight: 400;
+      color: #fff;
+      line-height: 1;
+      margin-bottom: 20px;
+    }
+
+    #overlay .curr {
+      font-family: system-ui, sans-serif;
+      font-size: 18px;
+      font-weight: 400;
+      color: #fff;
+      line-height: 1.6;
+    }
+
+    #overlay .best {
+      font-family: system-ui, sans-serif;
+      font-size: 14px;
+      font-weight: 400;
+      color: rgba(255,255,255,0.45);
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="score">0</div>
+
+  <div id="stage">
+    <img id="podo" src="podo_.png" alt="포도" draggable="false" />
+  </div>
+
+  <div id="overlay">
+    <div class="title">포도가 화났다</div>
+    <div class="curr" id="currScore">점수: 0</div>
+    <div class="best" id="bestScore">최고: 0</div>
+  </div>
+
+  <script>
+    const podo      = document.getElementById('podo');
+    const scoreEl   = document.getElementById('score');
+    const overlay   = document.getElementById('overlay');
+    const currScore = document.getElementById('currScore');
+    const bestScore = document.getElementById('bestScore');
+
+    const IMG_LYING    = 'podo_.png';
+    const IMG_STANDING = 'podo_stand.png';
+
+    let state    = 'LYING';
+    let score    = 0;
+    let best     = 0;
+    let pressing = false;
+    let onPodo   = false;
+
+    let scoreTimer = null;
+    let stateTimer = null;
+    let warnTimer  = null;
+
+    // ── audio ─────────────────────────────────────────────────
+
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+
+    function playTuk() {
+      const osc  = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(260, ac.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(140, ac.currentTime + 0.05);
+      gain.gain.setValueAtTime(0.18, ac.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.06);
+      osc.start(ac.currentTime);
+      osc.stop(ac.currentTime + 0.07);
+    }
+
+    function playWal() {
+      const osc  = ac.createOscillator();
+      const gain = ac.createGain();
+      osc.connect(gain);
+      gain.connect(ac.destination);
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(180, ac.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(60, ac.currentTime + 0.18);
+      gain.gain.setValueAtTime(0.28, ac.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 0.22);
+      osc.start(ac.currentTime);
+      osc.stop(ac.currentTime + 0.25);
+    }
+
+    // resume AudioContext on first interaction (browser policy)
+    function resumeAc() { if (ac.state === 'suspended') ac.resume(); }
+
+    // ── difficulty ────────────────────────────────────────────
+
+    function lyingRange() {
+      if (score < 10)  return [3000, 5000];
+      if (score < 25)  return [2000, 3500];
+      return [1000, 2500];
+    }
+
+    function warnDuration() {
+      return score >= 25 ? 200 : 400;
+    }
+
+    // ── helpers ───────────────────────────────────────────────
+
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+
+    function setScore(n) {
+      score = n;
+      scoreEl.textContent = n;
+    }
+
+    // ── state machine ─────────────────────────────────────────
+
+    function goLying() {
+      state = 'LYING';
+      podo.src = IMG_LYING;
+      podo.classList.remove('warn');
+
+      const [minT, maxT] = lyingRange();
+      const duration = rand(minT, maxT);
+      const warnMs   = warnDuration();
+
+      podo.style.setProperty('--warn-dur', warnMs + 'ms');
+
+      warnTimer = setTimeout(() => {
+        if (state !== 'LYING') return;
+        podo.classList.add('warn');
+      }, duration - warnMs);
+
+      stateTimer = setTimeout(goStanding, duration);
+    }
+
+    function goStanding() {
+      clearTimeout(warnTimer);
+      state = 'STANDING';
+      podo.src = IMG_STANDING;
+      podo.classList.remove('warn');
+      podo.classList.remove('petting');
+
+      if (pressing && onPodo) { gameOver(); return; }
+
+      stateTimer = setTimeout(goLying, rand(1000, 2000));
+    }
+
+    function gameOver() {
+      state = 'DEAD';
+      clearTimeout(stateTimer);
+      clearTimeout(warnTimer);
+      stopScoring();
+      podo.classList.remove('petting');
+
+      playWal();
+      document.body.classList.add('shake');
+      document.body.addEventListener('animationend', () => {
+        document.body.classList.remove('shake');
+      }, { once: true });
+
+      if (score > best) best = score;
+      currScore.textContent = '점수: ' + score;
+      bestScore.textContent = '최고: ' + best;
+      overlay.classList.add('show');
+    }
+
+    function restart() {
+      overlay.classList.remove('show');
+      pressing = false;
+      onPodo   = false;
+      setScore(0);
+      goLying();
+    }
+
+    // ── scoring ───────────────────────────────────────────────
+
+    function startScoring() {
+      if (scoreTimer) return;
+      podo.classList.add('petting');
+      scoreTimer = setInterval(() => {
+        if (state === 'LYING') {
+          setScore(score + 1);
+          playTuk();
+        }
+      }, 200);
+    }
+
+    function stopScoring() {
+      clearInterval(scoreTimer);
+      scoreTimer = null;
+      podo.classList.remove('petting');
+    }
+
+    // ── hit test ──────────────────────────────────────────────
+
+    function hitTest(x, y) {
+      const r = podo.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    }
+
+    function onMove(x, y) {
+      if (state === 'DEAD') return;
+      onPodo = hitTest(x, y);
+      if (pressing && onPodo) {
+        if (state === 'LYING')    startScoring();
+        else if (state === 'STANDING') gameOver();
+      } else {
+        stopScoring();
+      }
+    }
+
+    // ── mouse ─────────────────────────────────────────────────
+
+    document.addEventListener('mousedown', (e) => {
+      resumeAc();
+      if (state === 'DEAD') return;
+      pressing = true;
+      onPodo = hitTest(e.clientX, e.clientY);
+      if (onPodo) {
+        if (state === 'STANDING') gameOver();
+        else startScoring();
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      pressing = false;
+      stopScoring();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      onMove(e.clientX, e.clientY);
+    });
+
+    // ── touch ─────────────────────────────────────────────────
+
+    document.addEventListener('touchstart', (e) => {
+      resumeAc();
+      if (state === 'DEAD') return;
+      pressing = true;
+      const t = e.touches[0];
+      onPodo = hitTest(t.clientX, t.clientY);
+      if (onPodo) {
+        if (state === 'STANDING') gameOver();
+        else startScoring();
+      }
+    }, { passive: true });
+
+    document.addEventListener('touchend', () => {
+      pressing = false;
+      stopScoring();
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+      const t = e.touches[0];
+      onMove(t.clientX, t.clientY);
+    }, { passive: true });
+
+    // ── retry ─────────────────────────────────────────────────
+
+    overlay.addEventListener('click', restart);
+    overlay.addEventListener('touchend', (e) => { e.preventDefault(); restart(); });
+
+    // ── start ─────────────────────────────────────────────────
+
+    goLying();
+  </script>
+
+</body>
+</html>
